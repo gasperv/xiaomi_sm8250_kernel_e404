@@ -1,6 +1,7 @@
 [submodule "KernelSU"]
 	path = KernelSU
-	url = https://github.com/ReSukiSU/ReSukiSU
+	url = https://github.com/gasperv/xiaomi_sm8250_kernel_e404
+	branch = resukisu-alioth
 [submodule "Baseband-guard"]
 	path = Baseband-guard
 	url = https://github.com/vc-teahouse/Baseband-guard
