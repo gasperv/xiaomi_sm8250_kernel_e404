@@ -195,7 +195,7 @@ choose_config_mode() {
 # Install begins here
 # 
 
-devicename=pipa
+devicename=alioth
 case "$devicename" in
   munch|alioth|pipa)
     is_slot_device=1;
@@ -236,7 +236,20 @@ else
 fi
 
 mv *-Image $home/Image
-mv *-dtb $home/dtb
+# Undervolted GPU dtb is opt-in: add -uv to the zip name (e.g. ...-EFFCPU-uv.zip)
+case "$(basename "$ZIPFILE")" in
+  *[-_][Uu][Vv][-_.]*) gpu_uv=1 ;;
+  *) gpu_uv=0 ;;
+esac
+if [[ $gpu_uv == 1 ]] && ls *-dtb-uv >/dev/null 2>&1; then
+  ui_print "--> GPU undervolt (-uv) detected, using undervolted GPU DTB..."
+  rm -f *-dtb
+  mv *-dtb-uv $home/dtb
+else
+  ui_print "--> Stock GPU voltages"
+  rm -f *-dtb-uv
+  mv *-dtb $home/dtb
+fi
 mv *-dtbo.img $home/dtbo.img
 
 dump_boot
