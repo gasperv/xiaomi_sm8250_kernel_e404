@@ -4,7 +4,8 @@
 	branch = resukisu-alioth
 [submodule "Baseband-guard"]
 	path = Baseband-guard
-	url = https://github.com/vc-teahouse/Baseband-guard
+	url = https://github.com/gasperv/xiaomi_sm8250_kernel_e404
+	branch = bbg-alioth
 [submodule "nomount"]
 	path = nomount
 	url = https://github.com/maxsteeel/nomount
