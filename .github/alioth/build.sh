@@ -37,6 +37,7 @@ if [ -x ./mkdtb_uv.sh ]; then ./mkdtb_uv.sh "$OUT"; fi
 # Sanity checks: root and hiding must actually be in the image
 strings "$OUT/vmlinux" > "$OUT/vmlinux.strings"
 grep "^Linux version 4.19" "$OUT/vmlinux.strings"
+grep -m2 -E "version (code|name):" "$OUT/build.log" || true
 grep -E '^CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT)=' "$OUT/.config"
 grep -E "@ReSukiSU|susfs is initialized" "$OUT/vmlinux.strings"
 grep -q "@ReSukiSU" "$OUT/vmlinux.strings" || { echo "ReSukiSU missing from vmlinux"; exit 1; }
