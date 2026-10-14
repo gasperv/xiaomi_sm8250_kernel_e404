@@ -1,0 +1,120 @@
+name: alioth build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Kernel branch, tag or commit to build
+        default: alioth-next2
+      release:
+        description: Upload the zips as a draft release
+        type: boolean
+        default: true
+      title:
+        description: Release title (default "CI <ref> <commit>")
+        default: ""
+      notes:
+        description: Extra release notes
+        default: ""
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      release:
+        type: boolean
+        default: true
+      title:
+        type: string
+        default: ""
+      notes:
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  NEUTRON_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/06092026/neutron-clang-06092026.tar.zst
+  NEUTRON_SHA256: 531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: CI scripts
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: ci
+          sparse-checkout: .github
+
+      - name: Kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          path: kernel
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: AnyKernel3
+        uses: actions/checkout@v4
+        with:
+          ref: anykernel-alioth
+          path: anykernel
+          fetch-depth: 1
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex cpio zip zstd libssl-dev libelf-dev \
+            python-is-python3 binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi >/dev/null
+
+      - name: Neutron Clang
+        run: |
+          mkdir -p "$HOME/neutron"
+          curl -fsSL -o neutron.tar.zst "$NEUTRON_URL"
+          echo "$NEUTRON_SHA256  neutron.tar.zst" | sha256sum -c
+          tar -C "$HOME/neutron" --zstd -xf neutron.tar.zst
+          rm neutron.tar.zst
+          echo "$HOME/neutron/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        id: build
+        run: |
+          clang --version | head -1
+          bash ci/.github/alioth/build.sh kernel anykernel dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.name }}
+          path: |
+            dist/${{ steps.build.outputs.name }}.zip
+            dist/SHA256SUMS
+            kernel/out/build.log
+
+      - name: Draft release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.build.outputs.name }}
+          REF: ${{ inputs.ref }}
+          TITLE: ${{ inputs.title }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          cd kernel
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=9 HEAD)
+          tag=ci-$(date -u +%y%m%d)-$short
+          {
+            echo "Built by GitHub Actions from \`$REF\` @ \`$short\` (Neutron Clang 06092026)."
+            echo
+            if [ -n "$NOTES" ]; then echo "$NOTES"; echo; fi
+            echo "Untested on device. Pick by filename: plain / -EFFCPU / -uv / -EFFCPU-uv (identical files; the installer reads the name)."
+            echo
+            echo "sha256 \`$(cut -d' ' -f1 ../dist/SHA256SUMS)\`"
+          } > ../notes.md
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "$sha" \
+            --title "${TITLE:-CI $REF $short}" --notes-file ../notes.md ../dist/*.zip
