@@ -29,7 +29,11 @@ make "${F[@]}" 2>&1 | tee "$OUT/build.log" | grep -E --line-buffered "error:|war
 rc=${PIPESTATUS[0]}
 set -e
 echo "build exit $rc after $(( $(date +%s) - start ))s"
-[ "$rc" -eq 0 ] || exit "$rc"
+if [ "$rc" -ne 0 ]; then
+	echo "---- last non-progress lines of build.log ----"
+	grep -vE '^\s+(CC|AR|LD|AS|HOSTCC|HOSTLD|GEN|CHK|UPD|CALL|DTC|SHIPPED|WRAP|LDS|OBJCOPY|MKELF|VDSO|KSYM)\s' "$OUT/build.log" | tail -80
+	exit "$rc"
+fi
 
 BOOT=$OUT/arch/arm64/boot
 if [ -x ./mkdtb_uv.sh ]; then ./mkdtb_uv.sh "$OUT"; fi
@@ -39,8 +43,8 @@ strings "$OUT/vmlinux" > "$OUT/vmlinux.strings"
 grep "^Linux version 4.19" "$OUT/vmlinux.strings"
 grep -m2 -E "version (code|name):" "$OUT/build.log" || true
 grep -E '^CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT)=' "$OUT/.config"
-grep -E "@ReSukiSU|susfs is initialized" "$OUT/vmlinux.strings"
-grep -q "@ReSukiSU" "$OUT/vmlinux.strings" || { echo "ReSukiSU missing from vmlinux"; exit 1; }
+grep -E "susfs is initialized" "$OUT/vmlinux.strings"
+grep -q "/data/adb/ksud" "$OUT/vmlinux.strings" || { echo "KernelSU missing from vmlinux"; exit 1; }
 grep -q "susfs is initialized" "$OUT/vmlinux.strings" || { echo "SUSFS missing from vmlinux"; exit 1; }
 
 cp "$BOOT/Image" "$AK/ALIOTH-Image"
