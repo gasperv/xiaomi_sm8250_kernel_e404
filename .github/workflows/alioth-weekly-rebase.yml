@@ -1,12 +1,8 @@
 name: alioth weekly rebase
 
-# Every week: if kvsnr113's staging-bpf moved, replay our commits on top of it,
-# push the result as <branch>-rebased and build a draft release from it.
-# Our commits are base-<branch>..<branch>; the tag base-<branch> marks the
-# upstream commit the branch currently sits on. A rebase conflict or a failed
-# build fails the run (GitHub emails the repo owner). Nothing here touches
-# <branch> itself: after the rebased build is tested on the phone, move
-# <branch> and its base tag by hand.
+# Every Monday: for each of our kernel branches, check whether kvsnr113's
+# staging-bpf moved and, if so, rebase and build it (see alioth-rebase.yml).
+# Each branch needs a tag base-<branch> on the upstream commit it sits on.
 
 on:
   schedule:
@@ -14,8 +10,8 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: Our kernel branch
-        default: alioth-next2
+        description: One branch only (default all tracked branches)
+        default: ""
       force:
         description: Rebuild even if this upstream commit was already handled
         type: boolean
@@ -24,90 +20,13 @@ on:
 permissions:
   contents: write
 
-env:
-  UPSTREAM: https://github.com/kvsnr113/xiaomi_sm8250_kernel_e404
-  UPSTREAM_BRANCH: staging-bpf
-
 jobs:
   rebase:
-    runs-on: ubuntu-24.04
-    outputs:
-      built: ${{ steps.rebase.outputs.built }}
-      notes: ${{ steps.rebase.outputs.notes }}
-      title: ${{ steps.rebase.outputs.title }}
-      ref: ${{ steps.rebase.outputs.ref }}
-    steps:
-      - name: Rebase onto upstream
-        id: rebase
-        env:
-          BRANCH: ${{ inputs.branch || 'alioth-next2' }}
-          FORCE: ${{ inputs.force || false }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git init -q k && cd k
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY"
-          git fetch -q --depth=100 origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" \
-            "refs/tags/base-$BRANCH:refs/tags/base-$BRANCH"
-          git fetch -q --depth=100 "$UPSTREAM" "$UPSTREAM_BRANCH"
-          old=$(git rev-parse "base-$BRANCH^{commit}")
-          new=$(git rev-parse FETCH_HEAD)
-          echo "base $old, upstream $new"
-
-          if [ "$old" = "$new" ]; then
-            echo "Upstream unchanged since $BRANCH was last rebased." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          mark=upstream-${new:0:9}
-          if [ "$FORCE" != true ] && git ls-remote --exit-code origin "refs/tags/$BRANCH-rebased-$mark" >/dev/null; then
-            echo "Upstream ${new:0:9} was already rebased and built (tag $BRANCH-rebased-$mark)." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          git checkout -q -b work "origin/$BRANCH"
-          if ! git rebase --empty=drop --onto "$new" "$old"; then
-            {
-              echo "## Rebase of $BRANCH onto $UPSTREAM_BRANCH ${new:0:9} FAILED"
-              echo '```'
-              git status
-              git diff --name-only --diff-filter=U
-              echo '```'
-            } | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-          git push -q -f origin "HEAD:refs/heads/$BRANCH-rebased"
-          git push -q -f origin "$new:refs/tags/$BRANCH-rebased-$mark"
-
-          upstream_log=$(git log --oneline --no-decorate "$new" --not "$old" | head -50 || true)
-          ours=$(git log --oneline --no-decorate "$new"..HEAD)
-          {
-            echo "## $BRANCH rebased onto $UPSTREAM_BRANCH ${new:0:9}"
-            echo "Pushed as \`$BRANCH-rebased\`; building."
-            echo "### New upstream commits"; echo '```'; echo "$upstream_log"; echo '```'
-            echo "### Our commits"; echo '```'; echo "$ours"; echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-          {
-            echo "built=true"
-            echo "ref=$BRANCH-rebased"
-            echo "title=AUTO $BRANCH on $UPSTREAM_BRANCH ${new:0:9}"
-            echo "notes<<EOF"
-            echo "Weekly auto-rebase of \`$BRANCH\` (base ${old:0:9}) onto kvsnr113 $UPSTREAM_BRANCH \`${new:0:9}\`."
-            echo
-            echo "New upstream commits (vs old base, max 50; a force-push can list rewritten ones too):"
-            echo '```'; echo "$upstream_log"; echo '```'
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: rebase
-    if: needs.rebase.outputs.built == 'true'
-    uses: ./.github/workflows/alioth-build.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJSON(inputs.branch && format('["{0}"]', inputs.branch) || '["alioth-next2", "alioth-susfs23"]') }}
+    uses: ./.github/workflows/alioth-rebase.yml
     with:
-      ref: ${{ needs.rebase.outputs.ref }}
-      release: true
-      title: ${{ needs.rebase.outputs.title }}
-      notes: ${{ needs.rebase.outputs.notes }}
+      branch: ${{ matrix.branch }}
+      force: ${{ inputs.force || false }}
