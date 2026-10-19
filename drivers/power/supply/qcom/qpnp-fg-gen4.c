@@ -4751,6 +4751,28 @@ static void status_change_work(struct work_struct *work)
 
 	input_present = is_input_present(fg);
 	qnovo_en = is_qnovo_en(fg);
+
+	/*
+	 * Rapid SOC decrease and the vbatt_low 0% latch are only meant to walk
+	 * a dying battery to a clean shutdown, and nothing reverted them. With
+	 * shutdown-delay holding the reported SOC at 1%, the phone can survive
+	 * them and be plugged in, and then the reported SOC stayed at 1% until
+	 * reboot while the battery charged. Undo both once charging.
+	 */
+	if (input_present && fg->charge_status == POWER_SUPPLY_STATUS_CHARGING &&
+	    (chip->rapid_soc_dec_en || chip->vbatt_low)) {
+		if (chip->rapid_soc_dec_en) {
+			rc = fg_gen4_rapid_soc_config(chip, false);
+			if (rc < 0)
+				pr_err("Error in reverting rapid SOC decrease config rc:%d\n",
+					rc);
+			else
+				chip->rapid_soc_dec_en = false;
+		}
+		chip->vbatt_low = false;
+		chip->vbat_critical_low_count = 0;
+		pr_info("charging: cleared low battery SOC latch\n");
+	}
 	cycle_count_update(chip->counter, (u32)batt_soc >> 24,
 		fg->charge_status, fg->charge_done, input_present);
 #ifdef CONFIG_BATT_VERIFY_BY_DS28E16
