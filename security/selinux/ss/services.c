@@ -528,6 +528,16 @@ out:
 
 	return;
 }
+#else
+/* BakaSU selinux_hide takes this address; with audit off there is nothing to dump. */
+void security_dump_masked_av(struct policydb *policydb,
+			     struct context *scontext,
+			     struct context *tcontext,
+			     u16 tclass,
+			     u32 permissions,
+			     const char *reason)
+{
+}
 #endif
 
 /*
