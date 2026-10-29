@@ -1470,7 +1470,7 @@ void susfs_set_priority_uid_filter(void __user **user_info) {
 	if (!is_uid_filter_set_before)
 		is_uid_filter_set_before = true;
 	mutex_unlock(&susfs_mutex_lock_priority_uid_filter);
-
+	synchronize_rcu();
 	/* 4.19 kfree_rcu() is not NULL-safe, the first set has no old bitmap */
 	if (old_bitmap)
 		kfree_rcu(old_bitmap, rcu);
@@ -1546,7 +1546,7 @@ static int susfs_priority_app_strings_worker(void *data) {
 	rcu_assign_pointer(priority_uid_filter_bitmap, new_bitmap);
 	new_bitmap = NULL;
 	mutex_unlock(&susfs_mutex_lock_priority_uid_filter);
-
+	synchronize_rcu();
 	/* 4.19 kfree_rcu() is not NULL-safe, the first set has no old bitmap */
 	if (old_bitmap)
 		kfree_rcu(old_bitmap, rcu);
