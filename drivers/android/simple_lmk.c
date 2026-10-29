@@ -21,7 +21,7 @@
 static unsigned int slmk_minfree_mb = CONFIG_ANDROID_SIMPLE_LMK_MINFREE;
 static unsigned int slmk_timeout_ms = CONFIG_ANDROID_SIMPLE_LMK_TIMEOUT_MSEC;
 static unsigned int slmk_pressure = 95;
-static unsigned int slmk_swap_pct = 100;
+static unsigned int slmk_swap_pct = 40;
 static unsigned long slmk_kills;
 static unsigned long slmk_timeouts;
 #define MIN_FREE_PAGES (READ_ONCE(slmk_minfree_mb) * (SZ_1M / PAGE_SIZE))
