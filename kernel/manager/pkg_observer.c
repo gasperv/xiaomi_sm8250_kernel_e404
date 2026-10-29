@@ -33,6 +33,11 @@ static void ksu_track_throne_tw_func(struct callback_head *cb)
     if (current->flags & PF_EXITING)
         return;
     track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
+#ifdef CONFIG_KSU_SUSFS
+    // Renew the getpriority uid bitmap filter once packages are re-read,
+    // app uids change on reinstall
+    susfs_parse_priority_app_strings();
+#endif
 }
 
 // Never scan from the fsnotify handler: fsnotify_mark_srcu and the rename's dir
@@ -43,11 +48,6 @@ static void ksu_track_throne_tw_func(struct callback_head *cb)
 static void ksu_defer_track_throne(void)
 {
     struct callback_head *cb;
-
-#ifdef CONFIG_KSU_SUSFS
-    // Renew the getpriority uid bitmap filter, app uids change on reinstall
-    susfs_parse_priority_app_strings();
-#endif
 
     if (!(current->flags & PF_KTHREAD)) {
         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
@@ -60,6 +60,11 @@ static void ksu_defer_track_throne(void)
     }
     pr_warn("defer track_throne failed, run it inline\n");
     track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
+#ifdef CONFIG_KSU_SUSFS
+    // Renew the getpriority uid bitmap filter once packages are re-read,
+    // app uids change on reinstall
+    susfs_parse_priority_app_strings();
+#endif
 }
 
 static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
