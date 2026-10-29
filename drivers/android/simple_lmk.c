@@ -17,13 +17,20 @@
 #include <uapi/linux/sched/types.h>
 
 /* The minimum number of pages to free per reclaim */
-#define MIN_FREE_PAGES (CONFIG_ANDROID_SIMPLE_LMK_MINFREE * SZ_1M / PAGE_SIZE)
+/* Runtime tunables, see the module_param() block at the end of the file */
+static unsigned int slmk_minfree_mb = CONFIG_ANDROID_SIMPLE_LMK_MINFREE;
+static unsigned int slmk_timeout_ms = CONFIG_ANDROID_SIMPLE_LMK_TIMEOUT_MSEC;
+static unsigned int slmk_pressure = 95;
+static unsigned int slmk_swap_pct = 100;
+static unsigned long slmk_kills;
+static unsigned long slmk_timeouts;
+#define MIN_FREE_PAGES (READ_ONCE(slmk_minfree_mb) * (SZ_1M / PAGE_SIZE))
 
 /* Kill up to this many victims per reclaim */
 #define MAX_VICTIMS 1024
 
 /* Timeout in jiffies for each reclaim */
-#define RECLAIM_EXPIRES msecs_to_jiffies(CONFIG_ANDROID_SIMPLE_LMK_TIMEOUT_MSEC)
+#define RECLAIM_EXPIRES msecs_to_jiffies(READ_ONCE(slmk_timeout_ms))
 
 struct victim_info {
 	struct task_struct *tsk;
@@ -65,7 +72,15 @@ static unsigned long get_total_mm_pages(struct mm_struct *mm)
 	int i;
 
 	for (i = 0; i < NR_MM_COUNTERS; i++)
-		pages += get_mm_counter(mm, i);
+		if (i != MM_SWAPENTS)
+			pages += get_mm_counter(mm, i);
+
+	/*
+	 * Swapped-out pages live compressed in zram, so freeing them returns
+	 * only a fraction of a page each. Weight them so a mostly-swapped app
+	 * is not mistaken for a big win.
+	 */
+	pages += get_mm_counter(mm, MM_SWAPENTS) * READ_ONCE(slmk_swap_pct) / 100;
 
 	return pages;
 }
@@ -255,6 +270,7 @@ static void scan_and_kill(void)
 		struct task_struct *t, *vtsk = victim->tsk;
 		struct mm_struct *mm = victim->mm;
 
+		slmk_kills++;
 		pr_info("Killing %s with adj %d to free %lu KiB\n", vtsk->comm,
 			vtsk->signal->oom_score_adj,
 			victim->size << (PAGE_SHIFT - 10));
@@ -309,8 +325,10 @@ static void scan_and_kill(void)
 		wake_up(&reaper_waitq);
 
 	/* Wait until all the victims die or until the timeout is reached */
-	if (!wait_for_completion_timeout(&reclaim_done, RECLAIM_EXPIRES))
+	if (!wait_for_completion_timeout(&reclaim_done, RECLAIM_EXPIRES)) {
+		slmk_timeouts++;
 		pr_info("Timeout hit waiting for victims to die, proceeding\n");
+	}
 	else
 		msleep(28);
 
@@ -459,7 +477,7 @@ void simple_lmk_mm_freed(struct mm_struct *mm)
 static int simple_lmk_vmpressure_cb(struct notifier_block *nb,
 				    unsigned long pressure, void *data)
 {
-	if (pressure >= 95) {
+	if (pressure >= READ_ONCE(slmk_pressure)) {
 		atomic_set(&needs_reclaim, 1);
 		smp_mb__after_atomic();
 		if (waitqueue_active(&oom_waitq))
@@ -501,3 +519,11 @@ static const struct kernel_param_ops simple_lmk_init_ops = {
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "lowmemorykiller."
 module_param_cb(minfree, &simple_lmk_init_ops, NULL, 0200);
+/* Tunables, defaults match the previous hardcoded behaviour */
+module_param(slmk_minfree_mb, uint, 0644);
+module_param(slmk_timeout_ms, uint, 0644);
+module_param(slmk_pressure, uint, 0644);
+module_param(slmk_swap_pct, uint, 0644);
+/* Counters for benchmarking */
+module_param(slmk_kills, ulong, 0444);
+module_param(slmk_timeouts, ulong, 0444);
