@@ -12,7 +12,6 @@
 #include <linux/kcov.h>
 #include <linux/delay.h>
 #include <linux/scs.h>
-#include <linux/fie.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -196,7 +195,6 @@ void update_rq_clock(struct rq *rq)
 	delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
 	if (delta < 0)
 		return;
-	fie_update_rq_clock(rq);
 	rq->clock += delta;
 	update_rq_clock_task(rq, delta);
 }
@@ -4164,7 +4162,6 @@ void scheduler_tick(void)
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
-	fie_tick_entry();
 	thermal_pressure = arch_scale_thermal_pressure(cpu_of(rq));
 	update_thermal_load_avg(rq_clock_thermal(rq), rq, thermal_pressure);
 	curr->sched_class->task_tick(rq, curr, 0);
@@ -7472,7 +7469,6 @@ void __init sched_init(void)
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->cpu_capacity = rq->cpu_capacity_orig = SCHED_CAPACITY_SCALE;
-		rq->fits_capacity_threshold = SCHED_CAPACITY_SCALE;
 		rq->balance_callback = NULL;
 		rq->active_balance = 0;
 		rq->next_balance = jiffies;

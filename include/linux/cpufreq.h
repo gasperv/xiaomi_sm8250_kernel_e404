@@ -73,6 +73,7 @@ struct cpufreq_policy {
 	unsigned int		max;    /* in kHz */
 	unsigned int		cur;    /* in kHz, only needed if cpufreq
 					 * governors are used */
+	unsigned int		restore_freq; /* = policy->cur before transition */
 	unsigned int		suspend_freq; /* freq to set during suspend */
 
 	unsigned int		policy; /* see above */
@@ -187,7 +188,6 @@ extern struct kobject *cpufreq_global_kobject;
 unsigned int cpufreq_get(unsigned int cpu);
 unsigned int cpufreq_quick_get(unsigned int cpu);
 unsigned int cpufreq_quick_get_max(unsigned int cpu);
-unsigned int cpufreq_get_hw_max_freq(unsigned int cpu);
 void disable_cpufreq(void);
 
 u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
@@ -208,10 +208,6 @@ static inline unsigned int cpufreq_quick_get(unsigned int cpu)
 	return 0;
 }
 static inline unsigned int cpufreq_quick_get_max(unsigned int cpu)
-{
-	return 0;
-}
-static inline unsigned int cpufreq_get_hw_max_freq(unsigned int cpu)
 {
 	return 0;
 }
@@ -285,6 +281,10 @@ struct cpufreq_driver {
 	/* define one out of two */
 	int		(*setpolicy)(struct cpufreq_policy *policy);
 
+	/*
+	 * On failure, should always restore frequency to policy->restore_freq
+	 * (i.e. old freq).
+	 */
 	int		(*target)(struct cpufreq_policy *policy,
 				  unsigned int target_freq,
 				  unsigned int relation);	/* Deprecated */
@@ -301,6 +301,15 @@ struct cpufreq_driver {
 				       unsigned long min_perf,
 				       unsigned long target_perf,
 				       unsigned long capacity);
+
+	/*
+	 * Caches and returns the lowest driver-supported frequency greater than
+	 * or equal to the target frequency, subject to any driver limitations.
+	 * Does not set the frequency. Only to be implemented for drivers with
+	 * target().
+	 */
+	unsigned int	(*resolve_freq)(struct cpufreq_policy *policy,
+					unsigned int target_freq);
 
 	/*
 	 * Only for drivers with target_index() and CPUFREQ_ASYNC_NOTIFICATION
@@ -328,8 +337,6 @@ struct cpufreq_driver {
 	/* optional */
 	int		(*bios_limit)(int cpu, unsigned int *limit);
 
-	int		(*online)(struct cpufreq_policy *policy);
-	int		(*offline)(struct cpufreq_policy *policy);
 	int		(*exit)(struct cpufreq_policy *policy);
 	void		(*stop_cpu)(struct cpufreq_policy *policy);
 	int		(*suspend)(struct cpufreq_policy *policy);
@@ -437,9 +444,7 @@ static inline void cpufreq_resume(void) {}
 /* Policy Notifiers  */
 #define CPUFREQ_ADJUST			(0)
 #define CPUFREQ_NOTIFY			(1)
-#define CPUFREQ_CREATE_POLICY	(2)
-#define CPUFREQ_REMOVE_POLICY	(3)
-#define CPUFREQ_THERMAL			(6)
+#define CPUFREQ_THERMAL                 (2)
 
 #ifdef CONFIG_CPU_FREQ
 int cpufreq_register_notifier(struct notifier_block *nb, unsigned int list);
@@ -531,9 +536,6 @@ int cpufreq_driver_target(struct cpufreq_policy *policy,
 int __cpufreq_driver_target(struct cpufreq_policy *policy,
 				   unsigned int target_freq,
 				   unsigned int relation);
-unsigned int __resolve_freq(struct cpufreq_policy *policy,
-			    unsigned int target_freq,
-			    unsigned int relation);
 unsigned int cpufreq_driver_resolve_freq(struct cpufreq_policy *policy,
 					 unsigned int target_freq);
 unsigned int cpufreq_policy_transition_delay_us(struct cpufreq_policy *policy);
@@ -958,18 +960,14 @@ static inline void sched_cpufreq_governor_change(struct cpufreq_policy *policy,
 extern void arch_freq_prepare_all(void);
 extern unsigned int arch_freq_get_on_cpu(int cpu);
 
+extern void arch_set_freq_scale(const struct cpumask *cpus,
+				unsigned long cur_freq,
+				unsigned long max_freq);
+extern void arch_set_max_freq_scale(const struct cpumask *cpus,
+				    unsigned long policy_max_freq);
 extern void arch_set_min_freq_scale(const struct cpumask *cpus,
 				    unsigned long min_freq,
 				    unsigned long max_freq);
-
-#ifndef arch_set_freq_scale
-static __always_inline
-void arch_set_freq_scale(const struct cpumask *cpus,
-			 unsigned long cur_freq,
-			 unsigned long max_freq)
-{
-}
-#endif
 
 /* the following are really really optional */
 extern struct freq_attr cpufreq_freq_attr_scaling_available_freqs;

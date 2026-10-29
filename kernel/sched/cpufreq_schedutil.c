@@ -14,11 +14,9 @@
 
 #define IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
 
-DEFINE_PER_CPU_READ_MOSTLY(unsigned long, response_time_mult);
 struct sugov_tunables {
 	struct gov_attr_set	attr_set;
 	unsigned int		rate_limit_us;
-	unsigned int		response_time_ms;
 };
 
 struct sugov_policy {
@@ -30,7 +28,6 @@ struct sugov_policy {
 	raw_spinlock_t		update_lock;
 	u64			last_freq_update_time;
 	s64			freq_update_delay_ns;
-	unsigned int		freq_response_time_ms;
 	unsigned int		next_freq;
 	unsigned int		cached_raw_freq;
 
@@ -45,7 +42,7 @@ struct sugov_policy {
 	bool			limits_changed;
 	bool			need_freq_update;
 
-	u64			dvfs_headroom_lut_delay;
+	unsigned long		dvfs_capacity;
 	u16			dvfs_headroom_lut[SCHED_CAPACITY_SCALE + 1];
 };
 
@@ -59,6 +56,8 @@ struct sugov_cpu {
 	u64			last_update;
 
 	unsigned long		util;
+	u16			*dvfs_headroom_lut;
+
 	unsigned long		bw_min;
 };
 
@@ -71,70 +70,6 @@ static bool sugov_should_rate_limit(struct sugov_policy *sg_policy, u64 time)
 	s64 delta_ns = time - sg_policy->last_freq_update_time;
 
 	return delta_ns < sg_policy->freq_update_delay_ns;
-}
-
-static inline u64 sugov_calc_freq_response_ms(struct sugov_policy *sg_policy)
-{
-	int cpu = cpumask_first(sg_policy->policy->cpus);
-	unsigned long cap = arch_scale_cpu_capacity(cpu);
-	unsigned int max_freq, sec_max_freq;
-
-	max_freq = sg_policy->policy->cpuinfo.max_freq;
-	sec_max_freq = __resolve_freq(sg_policy->policy,
-				      max_freq - 1,
-				      CPUFREQ_RELATION_H);
-
-	/*
-	 * We will request max_freq as soon as util crosses the capacity at
-	 * second highest frequency. So effectively our response time is the
-	 * util at which we cross the cap@2nd_highest_freq.
-	 */
-	cap = sec_max_freq * cap / max_freq;
-
-	return approximate_runtime(cap + 1);
-}
-
-static inline void sugov_update_response_time_mult(struct sugov_policy *sg_policy)
-{
-	unsigned long mult;
-	int cpu;
-
-	if (unlikely(!sg_policy->freq_response_time_ms))
-		sg_policy->freq_response_time_ms = sugov_calc_freq_response_ms(sg_policy);
-
-	mult = sg_policy->freq_response_time_ms * SCHED_CAPACITY_SCALE;
-	mult /=	sg_policy->tunables->response_time_ms;
-
-	if (SCHED_WARN_ON(!mult))
-		mult = SCHED_CAPACITY_SCALE;
-
-	for_each_cpu(cpu, sg_policy->policy->cpus)
-		per_cpu(response_time_mult, cpu) = mult;
-}
-
-/*
- * Shrink or expand how long it takes to reach the maximum performance of the
- * policy.
- *
- * sg_policy->freq_response_time_ms is a constant value defined by PELT
- * HALFLIFE and the capacity of the policy (assuming HMP systems).
- *
- * sg_policy->tunables->response_time_ms is a user defined response time. By
- * setting it lower than sg_policy->freq_response_time_ms, the system will
- * respond faster to changes in util, which will result in reaching maximum
- * performance point quicker. By setting it higher, it'll slow down the amount
- * of time required to reach the maximum OPP.
- *
- * This should be applied when selecting the frequency.
- */
-static inline unsigned long
-sugov_apply_response_time(unsigned long util, int cpu)
-{
-	unsigned long mult;
-
-	mult = per_cpu(response_time_mult, cpu) * util;
-
-	return mult >> SCHED_CAPACITY_SHIFT;
 }
 
 static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
@@ -298,99 +233,29 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	return l_freq;
 }
 
-/*
- * Precompute the DVFS headroom lookup table when delay is one scheduler
- * tick rate.
- */
-#define SUGOV_RATE_LIMIT_US 2000ULL
-#ifdef CONFIG_HZ_1000
-#define SUGOV_DELAY_US SUGOV_RATE_LIMIT_US
-#else
-#define SUGOV_DELAY_US TICK_USEC
-#endif
-
-static void sugov_build_dvfs_headroom_lut(struct sugov_policy *sg_policy)
+static inline unsigned long sugov_apply_dvfs_headroom(unsigned long util,
+						      unsigned long capacity,
+						      unsigned long threshold)
 {
-	unsigned int i;
-	u64 delay;
+	unsigned long delta, headroom;
+	unsigned long capped_util = min(util, capacity);
+	unsigned long delta_t = (capacity * 220) >> 10;
 
-	delay = SUGOV_DELAY_US;
+	delta = capacity - capped_util;
 
-	sg_policy->dvfs_headroom_lut_delay = delay;
+	headroom = min((delta_t * capped_util) / threshold,
+			(delta_t * delta) / (capacity - threshold));
 
-	for (i = 0; i <= SCHED_CAPACITY_SCALE; i++)
-		sg_policy->dvfs_headroom_lut[i] = (u16)approximate_util_avg(i, delay);
+	return capped_util + headroom;
 }
 
-/*
- * DVFS decision are made at discrete points. If CPU stays busy, the util will
- * continue to grow, which means it could need to run at a higher frequency
- * before the next decision point was reached. IOW, we can't follow the util as
- * it grows immediately, but there's a delay before we issue a request to go to
- * higher frequency. The headroom caters for this delay so the system continues
- * to run at adequate performance point.
- *
- * This function provides enough headroom to provide adequate performance
- * assuming the CPU continues to be busy. This headroom is based on the
- * rate_limit_us of the cpufreq governor or min(curr.se.slice, TICK_US),
- * whichever is higher.
- *
- * XXX: Should we provide headroom when the util is decaying?
- */
-static inline unsigned long sugov_apply_dvfs_headroom(unsigned long util, int cpu)
+
+static inline unsigned long apply_dvfs_headroom(unsigned long util, int cpu)
 {
-	struct rq *rq = cpu_rq(cpu);
 	struct sugov_cpu *sg_cpu = &per_cpu(sugov_cpu, cpu);
-	struct sugov_policy *sg_policy = sg_cpu->sg_policy;
-	unsigned long cap, approx, h_max, growth, decay;
-	u64 delay;
 
-	if (!util)
-		return 0;
-
-	/*
-	 * What is the possible worst case scenario for updating util_avg, ctx
-	 * switch or TICK?
-	 */
-	if (rq->cfs.h_nr_queued > 1) {
-		delay = min_t(u64, rq->curr->se.slice / 1000, TICK_USEC);
-		delay = max(delay, SUGOV_RATE_LIMIT_US);
-	} else {
-		delay = TICK_USEC;
-#ifdef CONFIG_HZ_1000
-		delay = max(delay, SUGOV_RATE_LIMIT_US);
-#endif
-	}
-
-	if (likely(delay == sg_policy->dvfs_headroom_lut_delay)) {
-		approx = sg_policy->dvfs_headroom_lut[util];
-		h_max = sg_policy->dvfs_headroom_lut[0];
-	} else {
-		approx = approximate_util_avg(util, delay);
-		h_max = approximate_util_avg(0, delay);
-	}
-
-	/*
-	 * Capacity-aware DVFS headroom based on PELT for H_ideal = (C - util) * alpha
-	 *
-	 * alpha = h_max / 1024, where h_max = approximate_util_avg(0, delay) is the
-	 * maximum growth possible for this delay on a 1024-capacity core.
-	 *
-	 * To avoid division, rewrite (C - util) * alpha as:
-	 *   growth = h_max * C / 1024 (= C * alpha)
-	 *   decay  = h_max + util - approx (= util * alpha)
-	 *   H_ideal = growth - decay
-	 *
-	 * Derived from accumulate_sum() and approximate_util_avg() in pelt.c.
-	 */
-	cap = capacity_orig_of(cpu);
-	growth = mult_frac(h_max, cap, SCHED_CAPACITY_SCALE);
-	decay = h_max + util - approx;
-
-	if (growth > decay)
-		return util + growth - decay;
-
-	return util;
+	util = min_t(unsigned long, util, SCHED_CAPACITY_SCALE);
+	return sg_cpu->dvfs_headroom_lut[util];
 }
 
 unsigned long sugov_effective_cpu_perf(int cpu, unsigned long actual,
@@ -398,8 +263,7 @@ unsigned long sugov_effective_cpu_perf(int cpu, unsigned long actual,
 				 unsigned long max)
 {
 	/* Add dvfs headroom to actual utilization */
-	actual = sugov_apply_response_time(actual, cpu);
-	actual = sugov_apply_dvfs_headroom(actual, cpu);
+	actual = apply_dvfs_headroom(actual, cpu);
 	/* Actually we don't need to target the max performance */
 	if (actual < max)
 		max = actual;
@@ -730,53 +594,31 @@ static ssize_t rate_limit_us_show(struct gov_attr_set *attr_set, char *buf)
 {
 	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
 
-	return sysfs_emit(buf, "%u\n", tunables->rate_limit_us);
+	return sprintf(buf, "%u\n", tunables->rate_limit_us);
 }
 
 static ssize_t
 rate_limit_us_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
 {
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	struct sugov_policy *sg_policy;
+	unsigned int rate_limit_us;
+
+	if (kstrtouint(buf, 10, &rate_limit_us))
+		return -EINVAL;
+
+	tunables->rate_limit_us = rate_limit_us;
+
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook)
+		sg_policy->freq_update_delay_ns = rate_limit_us * NSEC_PER_USEC;
+
 	return count;
 }
 
 static struct governor_attr rate_limit_us = __ATTR_RW(rate_limit_us);
 
-static ssize_t response_time_ms_show(struct gov_attr_set *attr_set, char *buf)
-{
-	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
-
-	return sprintf(buf, "%u\n", tunables->response_time_ms);
-}
-
-static ssize_t
-response_time_ms_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
-{
-	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
-	struct sugov_policy *sg_policy;
-	unsigned int response_time_ms;
-
-	if (kstrtouint(buf, 10, &response_time_ms))
-		return -EINVAL;
-
-	/* XXX need special handling for high values? */
-
-	tunables->response_time_ms = response_time_ms;
-
-	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
-		if (sg_policy->tunables == tunables) {
-			sugov_update_response_time_mult(sg_policy);
-			break;
-		}
-	}
-
-	return count;
-}
-
-static struct governor_attr response_time_ms = __ATTR_RW(response_time_ms);
-
 static struct attribute *sugov_attributes[] = {
 	&rate_limit_us.attr,
-	&response_time_ms.attr,
 	NULL
 };
 
@@ -796,6 +638,25 @@ static struct kobj_type sugov_tunables_ktype = {
 /********************** cpufreq governor interface *********************/
 
 static struct cpufreq_governor schedutil_gov;
+
+static void sugov_build_dvfs_headroom_lut(struct sugov_policy *sg_policy)
+{
+	struct cpufreq_policy *policy = sg_policy->policy;
+	unsigned long capacity = capacity_orig_of(policy->cpu);
+	unsigned long threshold;
+	unsigned long util;
+
+	if (sg_policy->dvfs_capacity == capacity)
+		return;
+
+	sg_policy->dvfs_capacity = capacity;
+
+	threshold = (capacity * 15) / 100;
+
+	for (util = 0; util <= SCHED_CAPACITY_SCALE; util++)
+		sg_policy->dvfs_headroom_lut[util] =
+			sugov_apply_dvfs_headroom(util, capacity, threshold);
+}
 
 static struct sugov_policy *sugov_policy_alloc(struct cpufreq_policy *policy)
 {
@@ -914,6 +775,8 @@ static int sugov_init(struct cpufreq_policy *policy)
 		goto disable_fast_switch;
 	}
 
+	sugov_build_dvfs_headroom_lut(sg_policy);
+
 	ret = sugov_kthread_create(sg_policy);
 	if (ret)
 		goto free_sg_policy;
@@ -929,7 +792,6 @@ static int sugov_init(struct cpufreq_policy *policy)
 		sg_policy->tunables = global_tunables;
 
 		gov_attr_set_get(&global_tunables->attr_set, &sg_policy->tunables_hook);
-		sugov_build_dvfs_headroom_lut(sg_policy);
 		goto out;
 	}
 
@@ -939,13 +801,10 @@ static int sugov_init(struct cpufreq_policy *policy)
 		goto stop_kthread;
 	}
 
+	tunables->rate_limit_us = 2000;
+
 	policy->governor_data = sg_policy;
 	sg_policy->tunables = tunables;
-
-	tunables->rate_limit_us = 2000;
-	tunables->response_time_ms = sugov_calc_freq_response_ms(sg_policy);
-	sugov_update_response_time_mult(sg_policy);
-	sugov_build_dvfs_headroom_lut(sg_policy);
 
 	ret = kobject_init_and_add(&tunables->attr_set.kobj, &sugov_tunables_ktype,
 				   get_governor_parent_kobj(policy), "%s",
@@ -1011,6 +870,15 @@ static int sugov_start(struct cpufreq_policy *policy)
 
 	sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 
+	for_each_cpu(cpu, policy->cpus) {
+		struct sugov_cpu *sg_cpu = &per_cpu(sugov_cpu, cpu);
+
+		memset(sg_cpu, 0, sizeof(*sg_cpu));
+		sg_cpu->cpu			= cpu;
+		sg_cpu->sg_policy		= sg_policy;
+		sg_cpu->dvfs_headroom_lut   = sg_policy->dvfs_headroom_lut;
+	}
+
 	if (policy_is_shared(policy))
 		uu = sugov_update_shared;
 	else if (policy->fast_switch_enabled && cpufreq_driver_has_adjust_perf())
@@ -1021,22 +889,8 @@ static int sugov_start(struct cpufreq_policy *policy)
 	for_each_cpu(cpu, policy->cpus) {
 		struct sugov_cpu *sg_cpu = &per_cpu(sugov_cpu, cpu);
 
-		memset(sg_cpu, 0, sizeof(*sg_cpu));
-		sg_cpu->cpu = cpu;
-		sg_cpu->sg_policy = sg_policy;
-	}
-
-	/*
-	 * Publish the hooks only after all per-CPU data is initialized, so a
-	 * shared policy's sugov_update_shared() never reads an uninitialized
-	 * sibling sugov_cpu.
-	 */
-	for_each_cpu(cpu, policy->cpus) {
-		struct sugov_cpu *sg_cpu = &per_cpu(sugov_cpu, cpu);
-
 		cpufreq_add_update_util_hook(cpu, &sg_cpu->update_util, uu);
 	}
-
 	return 0;
 }
 
@@ -1061,6 +915,8 @@ static void sugov_limits(struct cpufreq_policy *policy)
 	struct sugov_policy *sg_policy = policy->governor_data;
 	unsigned long flags, now;
 	unsigned int freq;
+
+	sugov_build_dvfs_headroom_lut(sg_policy);
 
 	if (!policy->fast_switch_enabled) {
 		mutex_lock(&sg_policy->work_lock);

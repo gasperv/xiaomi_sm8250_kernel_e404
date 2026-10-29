@@ -94,15 +94,11 @@ int __weak arch_asym_cpu_priority(int cpu)
 #define capacity_greater(cap1, cap2) ((cap1) * 1024 > (cap2) * 1078)
 
 /*
- * fits_capacity() must ensure that a task will not be 'stuck' on a CPU with
- * lower capacity for too long. This the threshold is the util value at which
- * if a task becomes always busy it could miss misfit migration load balance
- * event. So we consider a task is misfit before it reaches this point.
+ * The margin used when comparing utilization with CPU capacity.
+ *
+ * (default: ~20%)
  */
-static inline bool fits_capacity(unsigned long util, int cpu)
-{
-	return util < cpu_rq(cpu)->fits_capacity_threshold;
-}
+#define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
 
 #endif
 
@@ -4747,12 +4743,13 @@ static inline int util_fits_cpu(unsigned long util,
 				int cpu)
 {
 	unsigned long capacity_orig, capacity_orig_thermal;
+	unsigned long capacity = capacity_of(cpu);
 	bool fits, uclamp_max_fits;
 
 	/*
 	 * Check if the real util fits without any uclamp boost/cap applied.
 	 */
-	fits = fits_capacity(util, cpu);
+	fits = fits_capacity(util, capacity);
 
 	if (!uclamp_is_used())
 		return fits;
@@ -9953,9 +9950,8 @@ static inline void init_sd_lb_stats(struct sd_lb_stats *sds)
 	};
 }
 
-static unsigned long scale_rt_capacity(int cpu)
+static unsigned long scale_rt_capacity(int cpu, unsigned long max)
 {
-	unsigned long max = arch_scale_cpu_capacity(cpu);
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long used, free;
 	unsigned long irq;
@@ -9991,45 +9987,44 @@ void init_max_cpu_capacity(struct max_cpu_capacity *mcc) {
 
 static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 {
-	unsigned long capacity = scale_rt_capacity(cpu);
-	struct rq *rq = cpu_rq(cpu);
+	unsigned long capacity = arch_scale_cpu_capacity(cpu);
 	struct sched_group *sdg = sd->groups;
-	u64 limit;
+	struct max_cpu_capacity *mcc;
+	unsigned long max_capacity;
+	int max_cap_cpu;
+	unsigned long flags;
+
+	cpu_rq(cpu)->cpu_capacity_orig = capacity;
+
+	capacity *= arch_scale_max_freq_capacity(sd, cpu);
+	capacity >>= SCHED_CAPACITY_SHIFT;
+
+	mcc = &cpu_rq(cpu)->rd->max_cpu_capacity;
+
+	raw_spin_lock_irqsave(&mcc->lock, flags);
+	max_capacity = mcc->val;
+	max_cap_cpu = mcc->cpu;
+
+	if ((max_capacity > capacity && max_cap_cpu == cpu) ||
+	    (max_capacity < capacity)) {
+		mcc->val = capacity;
+		mcc->cpu = cpu;
+#ifdef CONFIG_SCHED_DEBUG
+		raw_spin_unlock_irqrestore(&mcc->lock, flags);
+		printk_deferred(KERN_INFO "CPU%d: update max cpu_capacity %lu\n",
+				cpu, capacity);
+		goto skip_unlock;
+#endif
+	}
+	raw_spin_unlock_irqrestore(&mcc->lock, flags);
+
+skip_unlock: __attribute__ ((unused));
+	capacity = scale_rt_capacity(cpu, capacity);
 
 	if (!capacity)
 		capacity = 1;
 
-	rq->cpu_capacity = capacity;
-
-	/*
-	 * Calculate the util at which the task must be considered a misfit.
-	 *
-	 * We must ensure that a task experiences the same ramp-up time to
-	 * reach max performance point of the system regardless of the CPU it
-	 * is running on (due to invariance, time will stretch and task will
-	 * take longer to achieve the same util value compared to a task
-	 * running on a big CPU) and a delay in misfit migration which depends
-	 * on TICK doesn't end up hurting it as it can happen after we would
-	 * have crossed this threshold.
-	 *
-	 * To ensure that invariance is taken into account, we don't scale time
-	 * and use it as-is, approximate_util_avg() will then let us know the
-	 * our threshold.
-	 *
-	 * Multiply approximate runtime of dynamic capacity by 1024 (the PELT
-	 * period constant) rather than USEC_PER_MSEC (1000) for accurate
-	 * period-to-microsecond conversion. Each iteration of approximate_runtime()
-	 * advances by delta = 1024 PELT units ~ 1024 us.
-	 *
-	 * On very slow or heavily throttled CPUs, the ramp-up time can be shorter
-	 * than one tick interval, which would cause limit to wrap to a huge u64
-	 * value and make fits_capacity_threshold incorrectly equal to
-	 * SCHED_CAPACITY_SCALE. So, add a safe subtraction.
-	 */
-	limit = approximate_runtime(capacity) * 1024ULL;
-	lsub_positive(&limit, TICK_USEC);	/* sd->balance_interval is more accurate */
-	rq->fits_capacity_threshold = approximate_util_avg(0, limit);
-
+	cpu_rq(cpu)->cpu_capacity = capacity;
 	sdg->sgc->capacity = capacity;
 	sdg->sgc->min_capacity = capacity;
 	sdg->sgc->max_capacity = capacity;

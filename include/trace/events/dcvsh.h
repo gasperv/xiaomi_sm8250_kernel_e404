@@ -12,51 +12,21 @@
 #include <linux/tracepoint.h>
 
 TRACE_EVENT(dcvsh_freq,
-	TP_PROTO(unsigned long cpu, unsigned long req_freq,
-		 unsigned long throttled_freq, unsigned long thermal_pressure),
+	TP_PROTO(unsigned long cpu, unsigned long freq),
 
-	TP_ARGS(cpu, req_freq, throttled_freq, thermal_pressure),
+	TP_ARGS(cpu, freq),
 
 	TP_STRUCT__entry(
 		__field(unsigned long, cpu)
-		__field(unsigned long, req_freq)
-		__field(unsigned long, throttled_freq)
-		__field(unsigned long, thermal_pressure)
+		__field(unsigned long, freq)
 	),
 
 	TP_fast_assign(
 		__entry->cpu = cpu;
-		__entry->req_freq = req_freq;
-		__entry->throttled_freq = throttled_freq;
-		__entry->thermal_pressure = thermal_pressure;
+		__entry->freq = freq;
 	),
 
-	TP_printk("cpu:%lu requested_freq:%lu throttled_freq:%lu thermal_pressure_freq:%lu",
-		__entry->cpu,
-		__entry->req_freq,
-		__entry->throttled_freq,
-		__entry->thermal_pressure)
-);
-
-TRACE_EVENT(dcvsh_throttle,
-
-	TP_PROTO(unsigned long cpu, bool state),
-
-	TP_ARGS(cpu, state),
-
-	TP_STRUCT__entry(
-		__field(unsigned long, cpu)
-		__field(bool, state)
-	),
-
-	TP_fast_assign(
-		__entry->cpu = cpu;
-		__entry->state = state;
-	),
-
-	TP_printk("cpu:%lu throttle_%s",
-		__entry->cpu,
-		__entry->state ? "begin" : "end")
+	TP_printk("cpu:%lu max frequency:%lu", __entry->cpu, __entry->freq)
 );
 
 #endif /* _TRACE_DCVSH_H */
